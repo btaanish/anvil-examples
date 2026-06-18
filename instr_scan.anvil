@@ -1,0 +1,270 @@
+enum instr_type {
+    RVI_BRANCH,
+    RVI_JALR,
+    RVI_JUMP,
+    RVI_XRET,
+    RVC_BRANCH,
+    RVC_JUMP,
+    RVC_JR,
+    RVC_JALR,
+    RVC_RETURN,
+    INSTR_OTHER
+}
+
+/* Pure function: UJ-type immediate (JAL format)
+   #{sign**44, instr[19:12], instr[20], instr[30:21], 1'b0} */
+func uj_imm(instr) {
+    let s = instr[31] >>
+    #{s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, instr[19], instr[18], instr[17], instr[16], instr[15], instr[14], instr[13], instr[12], instr[20], instr[30], instr[29], instr[28], instr[27], instr[26], instr[25], instr[24], instr[23], instr[22], instr[21], 1'b0}
+}
+
+/* Pure function: SB-type immediate (Branch format)
+   #{sign**52, instr[7], instr[30:25], instr[11:8], 1'b0} */
+func sb_imm(instr) {
+    let s = instr[31] >>
+    #{s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, instr[7], instr[30], instr[29], instr[28], instr[27], instr[26], instr[25], instr[11], instr[10], instr[9], instr[8], 1'b0}
+}
+
+/* Pure function: RVC branch immediate
+   #{sign**56, instr[6:5], instr[2], instr[11:10], instr[4:3], 1'b0} */
+func rvc_b_imm(instr) {
+    let s = instr[12] >>
+    #{s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, instr[6], instr[5], instr[2], instr[11], instr[10], instr[4], instr[3], 1'b0}
+}
+
+/* Pure function: RVC jump immediate
+   #{sign**53, instr[8], instr[10:9], instr[6], instr[7], instr[2], instr[11], instr[5:3], 1'b0} */
+func rvc_j_imm(instr) {
+    let s = instr[12] >>
+    #{s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, instr[8], instr[10], instr[9], instr[6], instr[7], instr[2], instr[11], instr[5], instr[4], instr[3], 1'b0}
+}
+
+/* Pure function: check xret instruction pattern (SRET/MRET)
+   Bit layout: 00_x_1_0000_0010_0000_0000_0000_0111_0011
+   bit[29] is don't-care (distinguishes SRET vs MRET) */
+func is_xret(instr) {
+    (<(instr[0+:7])::logic[7]> == 7'b1110011) &
+    (<(instr[7+:13])::logic[13]> == 13'd0) &
+    instr[20] &
+    (<(instr[21+:4])::logic[4]> == 4'd0) &
+    (<(instr[25+:3])::logic[3]> == 3'd0) &
+    instr[28] & ~instr[30] & ~instr[31]
+}
+
+/* Pure function: classify instruction into enum type via priority chain */
+func classify_instr(rvi_branch, rvi_jalr, rvi_jal, xret,
+                    rvc_branch, rvc_jump, rvc_jr, rvc_jalr, rvc_return) {
+    if xret { instr_type::RVI_XRET }
+    else if rvi_branch { instr_type::RVI_BRANCH }
+    else if rvi_jalr { instr_type::RVI_JALR }
+    else if rvi_jal { instr_type::RVI_JUMP }
+    else if rvc_return { instr_type::RVC_RETURN }
+    else if rvc_branch { instr_type::RVC_BRANCH }
+    else if rvc_jump { instr_type::RVC_JUMP }
+    else if rvc_jr { instr_type::RVC_JR }
+    else if rvc_jalr { instr_type::RVC_JALR }
+    else { instr_type::INSTR_OTHER }
+}
+
+/* Pure function: select RVI immediate via match on instruction type */
+func rvi_imm_select(itype, instr) {
+    match (itype) {
+        instr_type::RVI_XRET => 64'd0,
+        instr_type::RVI_JUMP => call uj_imm(instr),
+        instr_type::RVI_BRANCH => call sb_imm(instr),
+        _ => 64'd0
+    }
+}
+
+/* Pure function: select RVC immediate via match on instruction type */
+func rvc_imm_select(itype, instr) {
+    match (itype) {
+        instr_type::RVC_BRANCH => call rvc_b_imm(instr),
+        instr_type::RVC_JUMP => call rvc_j_imm(instr),
+        instr_type::RVC_JR => call rvc_j_imm(instr),
+        instr_type::RVC_JALR => call rvc_j_imm(instr),
+        instr_type::RVC_RETURN => call rvc_j_imm(instr),
+        _ => 64'd0
+    }
+}
+
+/* Pure function: rvi_jump flag (true for JAL and XRET) via match */
+func is_rvi_jump_flag(itype) {
+    match (itype) {
+        instr_type::RVI_JUMP => 1'b1,
+        instr_type::RVI_XRET => 1'b1,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: rvi_return flag via match (JALR with link register conditions) */
+func is_rvi_return_flag(itype, rs1_is_link, rs1_ne_rd) {
+    match (itype) {
+        instr_type::RVI_JALR => rs1_is_link & rs1_ne_rd,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: rvi_call flag via match (JALR/JAL/XRET with rd as link) */
+func is_rvi_call_flag(itype, rd_is_link) {
+    match (itype) {
+        instr_type::RVI_JALR => rd_is_link,
+        instr_type::RVI_JUMP => rd_is_link,
+        instr_type::RVI_XRET => rd_is_link,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: rvc_jr flag via match (true for JR and RETURN) */
+func is_rvc_jr_flag(itype) {
+    match (itype) {
+        instr_type::RVC_JR => 1'b1,
+        instr_type::RVC_RETURN => 1'b1,
+        _ => 1'b0
+    }
+}
+
+/* Req/resp channel: instruction in, decoded signals out */
+chan instr_scan_ch {
+    left req : (logic[32]@res),
+    right res : (logic@#1),
+    right res_rvi_call : (logic@#1),
+    right res_rvi_branch : (logic@#1),
+    right res_rvi_jalr : (logic@#1),
+    right res_rvi_jump : (logic@#1),
+    right res_rvi_imm : (logic[64]@#1),
+    right res_rvc_branch : (logic@#1),
+    right res_rvc_jump : (logic@#1),
+    right res_rvc_jr : (logic@#1),
+    right res_rvc_return : (logic@#1),
+    right res_rvc_jalr : (logic@#1),
+    right res_rvc_call : (logic@#1),
+    right res_rvc_imm : (logic[64]@#1)
+}
+
+proc InstrScan(io : left instr_scan_ch) {
+    reg rvi_return_q : logic;
+    reg rvi_call_q : logic;
+    reg rvi_branch_q : logic;
+    reg rvi_jalr_q : logic;
+    reg rvi_jump_q : logic;
+    reg rvi_imm_q : logic[64];
+    reg rvc_branch_q : logic;
+    reg rvc_jump_q : logic;
+    reg rvc_jr_q : logic;
+    reg rvc_return_q : logic;
+    reg rvc_jalr_q : logic;
+    reg rvc_call_q : logic;
+    reg rvc_imm_q : logic[64];
+
+    loop {
+        let instr = recv io.req >>
+
+        /* Extract fields */
+        let opcode = <(instr[0+:7])::logic[7]> >>
+        let rd = <(instr[7+:5])::logic[5]> >>
+        let rs1 = <(instr[15+:5])::logic[5]> >>
+        let c_op = <(instr[0+:2])::logic[2]> >>
+        let c_funct3 = <(instr[13+:3])::logic[3]> >>
+        let c_rs2 = <(instr[2+:5])::logic[5]> >>
+
+        /* RVI decode */
+        let rvi_branch = opcode == 7'b1100011 >>
+        let rvi_jalr = opcode == 7'b1100111 >>
+        let rvi_jal = opcode == 7'b1101111 >>
+        let xret = call is_xret(instr) >>
+
+        /* Link register checks */
+        let rs1_is_link = (rs1 == 5'd1) | (rs1 == 5'd5) >>
+        let rd_is_link = (rd == 5'd1) | (rd == 5'd5) >>
+
+        /* RVC decode */
+        let rvc_jump = (c_funct3 == 3'b101) & (c_op == 2'b01) >>
+        let rvc_branch = ((c_funct3 == 3'b110) | (c_funct3 == 3'b111)) & (c_op == 2'b01) >>
+        let is_jal_r = (c_funct3 == 3'b100) & (c_rs2 == 5'b00000) & (c_op == 2'b10) >>
+        let rvc_jr = is_jal_r & ~instr[12] >>
+        let rvc_jalr = is_jal_r & instr[12] >>
+        let rvc_return = rd_is_link & rvc_jr >>
+
+        /* Classify instruction type via enum */
+        let itype = call classify_instr(rvi_branch, rvi_jalr, rvi_jal, xret,
+                                         rvc_branch, rvc_jump, rvc_jr, rvc_jalr, rvc_return) >>
+
+        /* Compute compound outputs via match-based functions */
+        let rvi_return = call is_rvi_return_flag(itype, rs1_is_link, rs1 != rd) >>
+        let rvi_call = call is_rvi_call_flag(itype, rd_is_link) >>
+        let rvi_jump = call is_rvi_jump_flag(itype) >>
+        let rvc_jr_out = call is_rvc_jr_flag(itype) >>
+
+        /* Register all outputs (parallel) */
+        set rvi_return_q := rvi_return;
+        set rvi_call_q := rvi_call;
+        set rvi_branch_q := rvi_branch;
+        set rvi_jalr_q := rvi_jalr;
+        set rvi_jump_q := rvi_jump;
+        set rvi_imm_q := call rvi_imm_select(itype, instr);
+        set rvc_branch_q := rvc_branch;
+        set rvc_jump_q := rvc_jump;
+        set rvc_jr_q := rvc_jr_out;
+        set rvc_return_q := rvc_return;
+        set rvc_jalr_q := rvc_jalr;
+        set rvc_call_q := rvc_jalr;
+        set rvc_imm_q := call rvc_imm_select(itype, instr) >>
+
+        cycle 1 >>
+
+        /* Send registered outputs */
+        send io.res (*rvi_return_q) >>
+        send io.res_rvi_call (*rvi_call_q) >>
+        send io.res_rvi_branch (*rvi_branch_q) >>
+        send io.res_rvi_jalr (*rvi_jalr_q) >>
+        send io.res_rvi_jump (*rvi_jump_q) >>
+        send io.res_rvi_imm (*rvi_imm_q) >>
+        send io.res_rvc_branch (*rvc_branch_q) >>
+        send io.res_rvc_jump (*rvc_jump_q) >>
+        send io.res_rvc_jr (*rvc_jr_q) >>
+        send io.res_rvc_return (*rvc_return_q) >>
+        send io.res_rvc_jalr (*rvc_jalr_q) >>
+        send io.res_rvc_call (*rvc_call_q) >>
+        send io.res_rvc_imm (*rvc_imm_q) >>
+
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan scan_le -- scan_ri : instr_scan_ch;
+    spawn InstrScan(scan_le);
+    reg counter : logic[8];
+    reg test_instr : logic[32];
+
+    /* Drive instruction input and receive decoded outputs */
+    loop {
+        send scan_ri.req (*test_instr) >>
+        let ret = recv scan_ri.res >>
+        let cal = recv scan_ri.res_rvi_call >>
+        let br = recv scan_ri.res_rvi_branch >>
+        let jalr = recv scan_ri.res_rvi_jalr >>
+        let jmp = recv scan_ri.res_rvi_jump >>
+        let rimm = recv scan_ri.res_rvi_imm >>
+        let cbr = recv scan_ri.res_rvc_branch >>
+        let cjmp = recv scan_ri.res_rvc_jump >>
+        let cjr = recv scan_ri.res_rvc_jr >>
+        let cret = recv scan_ri.res_rvc_return >>
+        let cjalr = recv scan_ri.res_rvc_jalr >>
+        let ccal = recv scan_ri.res_rvc_call >>
+        let cimm = recv scan_ri.res_rvc_imm >>
+        dprint"[Cycle %d] imm=%d" (*counter, cimm) >>
+        set test_instr := *test_instr + 32'd1 >>
+        cycle 1
+    }
+
+    loop {
+        set counter := *counter + 8'd1
+    }
+
+    loop {
+        cycle 30 >>
+        dfinish
+    }
+}

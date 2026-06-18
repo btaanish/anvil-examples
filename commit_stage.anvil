@@ -1,0 +1,384 @@
+enum commit_action {
+    ACT_NONE,
+    ACT_AMO,
+    ACT_FENCE,
+    ACT_FENCE_I,
+    ACT_SFENCE,
+    ACT_CSR_EXC,
+    ACT_STORE_WAIT,
+    ACT_NORMAL,
+    ACT_EXCEPTION
+}
+
+/* Pure function: classify port 0 commit action via priority chain.
+   Priority (highest first): AMO > fence > fence_i > sfence > CSR exc > store !ready > normal > exception */
+func classify_action(cond_amo, cond_fence, cond_fence_i, cond_sfence,
+                     cond_csr, drop0, csr_exc_valid,
+                     cond_store_no_amo, commit_lsu_ready, cond_no_ex, cond_ex) {
+    if cond_amo { commit_action::ACT_AMO }
+    else if cond_fence { commit_action::ACT_FENCE }
+    else if cond_fence_i { commit_action::ACT_FENCE_I }
+    else if cond_sfence { commit_action::ACT_SFENCE }
+    else if (cond_csr & ~drop0 & csr_exc_valid) { commit_action::ACT_CSR_EXC }
+    else if (cond_store_no_amo & ~commit_lsu_ready) { commit_action::ACT_STORE_WAIT }
+    else if cond_no_ex { commit_action::ACT_NORMAL }
+    else if (cond_ex & drop0) { commit_action::ACT_EXCEPTION }
+    else { commit_action::ACT_NONE }
+}
+
+/* Pure function: commit_ack port 0 via match on classified action */
+func compute_ack0(action, amo_resp_ack, no_st_pending) {
+    match (action) {
+        commit_action::ACT_AMO => amo_resp_ack,
+        commit_action::ACT_FENCE => no_st_pending,
+        commit_action::ACT_FENCE_I => no_st_pending,
+        commit_action::ACT_SFENCE => no_st_pending,
+        commit_action::ACT_NORMAL => 1'b1,
+        commit_action::ACT_EXCEPTION => 1'b1,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: GPR write enable port 0 via match.
+   AMO: special ack; CSR_EXC/EXCEPTION/NONE: suppressed;
+   all other cond_no_ex actions: write if ~drop0 & ~is_rd_fpr */
+func compute_we_gpr0(action, amo_resp_ack, drop0, is_rd_fpr) {
+    match (action) {
+        commit_action::ACT_AMO => amo_resp_ack,
+        commit_action::ACT_CSR_EXC => 1'b0,
+        commit_action::ACT_EXCEPTION => 1'b0,
+        commit_action::ACT_NONE => 1'b0,
+        _ => if (~drop0 & ~is_rd_fpr) { 1'b1 } else { 1'b0 }
+    }
+}
+
+/* Pure function: fence_i output via match */
+func compute_fence_i(action, no_st_pending) {
+    match (action) {
+        commit_action::ACT_FENCE_I => no_st_pending,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: fence output via match */
+func compute_fence(action, no_st_pending) {
+    match (action) {
+        commit_action::ACT_FENCE => no_st_pending,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: sfence_vma output via match */
+func compute_sfence(action, no_st_pending) {
+    match (action) {
+        commit_action::ACT_SFENCE => no_st_pending,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: flush_commit output via match */
+func compute_flush(action, amo_resp_ack) {
+    match (action) {
+        commit_action::ACT_AMO => amo_resp_ack,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: port 1 commit eligibility */
+func compute_port1_ok(ack0, i1_valid, halt, fu_is_csr, flush_dcache,
+                      is_amo, single_step, i1_ex_valid, fu_can_commit2) {
+    ack0 & i1_valid & ~halt & ~fu_is_csr & ~flush_dcache & ~is_amo
+         & ~single_step & ~i1_ex_valid & fu_can_commit2
+}
+
+/* Req/resp channel: all inputs @res, outputs @#1 */
+chan commit_ch {
+    /* --- Port 0 instruction fields --- */
+    left req_i0_valid : (logic@res),
+    left req_i0_ex_valid : (logic@res),
+    left req_i0_fu_is_store : (logic@res),
+    left req_i0_fu_is_csr : (logic@res),
+    left req_i0_fu_is_fpu : (logic@res),
+    left req_i0_is_rd_fpr : (logic@res),
+    left req_i0_is_amo : (logic@res),
+    left req_i0_op_is_sfence : (logic@res),
+    left req_i0_op_is_fence_i : (logic@res),
+    left req_i0_op_is_fence : (logic@res),
+    /* --- Port 1 instruction fields --- */
+    left req_i1_valid : (logic@res),
+    left req_i1_ex_valid : (logic@res),
+    left req_i1_fu_can_commit2 : (logic@res),
+    left req_i1_is_rd_fpr : (logic@res),
+    left req_i1_fu_is_fpu : (logic@res),
+    /* --- Control signals --- */
+    left req_halt : (logic@res),
+    left req_flush_dcache : (logic@res),
+    left req_single_step : (logic@res),
+    left req_drop0 : (logic@res),
+    left req_drop1 : (logic@res),
+    left req_amo_resp_ack : (logic@res),
+    left req_csr_exc_valid : (logic@res),
+    left req_commit_lsu_ready : (logic@res),
+    left req_no_st_pending : (logic@res),
+    left req_break_from_trigger : (logic@res),
+    left req_i0_dirty_fp : (logic@res),
+    left req_i1_dirty_fp : (logic@res),
+    left req_i0_csr_exc : (logic@res),
+    left req_i0_has_earlier_ex : (logic@res),
+    /* --- Commit outputs: ack/GPR/FPR --- */
+    right res : (logic@#1),
+    right res_ack1 : (logic@#1),
+    right res_we_gpr0 : (logic@#1),
+    right res_we_gpr1 : (logic@#1),
+    right res_we_fpr0 : (logic@#1),
+    right res_we_fpr1 : (logic@#1),
+    /* --- Commit outputs: LSU/CSR/fence --- */
+    right res_commit_lsu : (logic@#1),
+    right res_commit_csr : (logic@#1),
+    right res_amo_valid : (logic@#1),
+    right res_fence_i : (logic@#1),
+    right res_fence : (logic@#1),
+    right res_sfence_vma : (logic@#1),
+    right res_flush_commit : (logic@#1),
+    /* --- Commit outputs: CSR/FP/exception --- */
+    right res_csr_fflags : (logic@#1),
+    right res_use_csr_rdata : (logic@#1),
+    right res_csr_op : (logic@#1),
+    right res_csr_wdata : (logic@#1),
+    right res_dirty_fp : (logic@#1),
+    right res_exc_sel_csr : (logic@#1),
+    right res_exc_sel_instr : (logic@#1),
+    right res_exc_suppress : (logic@#1)
+}
+
+proc CommitStage(io : left commit_ch) {
+    /* Output registers for multi-cycle req/resp pattern */
+    reg ack0_q : logic;
+    reg ack1_q : logic;
+    reg we_gpr0_q : logic;
+    reg we_gpr1_q : logic;
+    reg we_fpr0_q : logic;
+    reg we_fpr1_q : logic;
+    reg commit_lsu_q : logic;
+    reg commit_csr_q : logic;
+    reg amo_valid_q : logic;
+    reg fence_i_q : logic;
+    reg fence_q : logic;
+    reg sfence_vma_q : logic;
+    reg flush_commit_q : logic;
+    reg csr_fflags_q : logic;
+    reg use_csr_rdata_q : logic;
+    reg csr_op_q : logic;
+    reg csr_wdata_q : logic;
+    reg dirty_fp_q : logic;
+    reg exc_sel_csr_q : logic;
+    reg exc_sel_instr_q : logic;
+    reg exc_suppress_q : logic;
+
+    loop {
+        /* Receive all inputs (valid until res is sent) */
+        let i0_valid = recv io.req_i0_valid >>
+        let i0_ex_valid = recv io.req_i0_ex_valid >>
+        let i0_fu_is_store = recv io.req_i0_fu_is_store >>
+        let i0_fu_is_csr = recv io.req_i0_fu_is_csr >>
+        let i0_fu_is_fpu = recv io.req_i0_fu_is_fpu >>
+        let i0_is_rd_fpr = recv io.req_i0_is_rd_fpr >>
+        let i0_is_amo = recv io.req_i0_is_amo >>
+        let i0_op_is_sfence = recv io.req_i0_op_is_sfence >>
+        let i0_op_is_fence_i = recv io.req_i0_op_is_fence_i >>
+        let i0_op_is_fence = recv io.req_i0_op_is_fence >>
+        let i1_valid = recv io.req_i1_valid >>
+        let i1_ex_valid = recv io.req_i1_ex_valid >>
+        let i1_fu_can_commit2 = recv io.req_i1_fu_can_commit2 >>
+        let i1_is_rd_fpr = recv io.req_i1_is_rd_fpr >>
+        let i1_fu_is_fpu = recv io.req_i1_fu_is_fpu >>
+        let halt = recv io.req_halt >>
+        let flush_dcache = recv io.req_flush_dcache >>
+        let single_step = recv io.req_single_step >>
+        let drop0 = recv io.req_drop0 >>
+        let drop1 = recv io.req_drop1 >>
+        let amo_resp_ack = recv io.req_amo_resp_ack >>
+        let csr_exc_valid = recv io.req_csr_exc_valid >>
+        let commit_lsu_ready = recv io.req_commit_lsu_ready >>
+        let no_st_pending = recv io.req_no_st_pending >>
+        let break_trigger = recv io.req_break_from_trigger >>
+        let i0_dirty_fp = recv io.req_i0_dirty_fp >>
+        let i1_dirty_fp = recv io.req_i1_dirty_fp >>
+        let i0_csr_exc = recv io.req_i0_csr_exc >>
+        let i0_has_earlier_ex = recv io.req_i0_has_earlier_ex >>
+
+        /* Compute key conditions */
+        let cond_valid = i0_valid & ~halt >>
+        let cond_ex = cond_valid & (i0_ex_valid | break_trigger) >>
+        let cond_no_ex = cond_valid & ~i0_ex_valid & ~break_trigger >>
+        let cond_store_no_amo = cond_no_ex & i0_fu_is_store & ~i0_is_amo >>
+        let cond_csr = cond_no_ex & i0_fu_is_csr >>
+        let cond_sfence = cond_no_ex & i0_op_is_sfence & ~drop0 >>
+        let cond_fence_i = cond_no_ex & i0_op_is_fence_i & ~drop0 >>
+        let cond_fence = cond_no_ex & i0_op_is_fence & ~drop0 >>
+        let cond_amo = cond_no_ex & i0_is_amo >>
+
+        /* Classify port 0 action via priority chain */
+        let action = call classify_action(cond_amo, cond_fence, cond_fence_i, cond_sfence,
+                                           cond_csr, drop0, csr_exc_valid,
+                                           cond_store_no_amo, commit_lsu_ready,
+                                           cond_no_ex, cond_ex) >>
+
+        /* Port 0: commit_ack via match on action */
+        let ack0 = call compute_ack0(action, amo_resp_ack, no_st_pending) >>
+
+        /* Port 0: register write enables via match */
+        let gpr0 = call compute_we_gpr0(action, amo_resp_ack, drop0,
+                                         i0_is_rd_fpr) >>
+        let fpr0 = if (cond_no_ex & ~drop0 & i0_is_rd_fpr) { 1'b1 } else { 1'b0 } >>
+
+        /* Port 0: LSU/CSR commit signals */
+        let lsu_o = if (cond_store_no_amo & commit_lsu_ready) { 1'b1 } else { 1'b0 } >>
+        let csr_o = if (cond_csr & ~drop0 & ~csr_exc_valid) { 1'b1 } else { 1'b0 } >>
+
+        /* Port 0: fence/sfence/AMO/flush signals via match */
+        let fi_o = call compute_fence_i(action, no_st_pending) >>
+        let fe_o = call compute_fence(action, no_st_pending) >>
+        let sf_o = call compute_sfence(action, no_st_pending) >>
+        let flush_o = call compute_flush(action, amo_resp_ack) >>
+
+        /* Port 1: commit decision via pure func */
+        let p1_ok = call compute_port1_ok(ack0, i1_valid, halt, i0_fu_is_csr,
+                                           flush_dcache, i0_is_amo, single_step,
+                                           i1_ex_valid, i1_fu_can_commit2) >>
+        let gpr1 = if (p1_ok & ~drop1 & ~i1_is_rd_fpr) { 1'b1 } else { 1'b0 } >>
+        let fpr1 = if (p1_ok & ~drop1 & i1_is_rd_fpr) { 1'b1 } else { 1'b0 } >>
+
+        /* FP flags: port 0 OR port 1 */
+        let ff0 = if (cond_no_ex & i0_fu_is_fpu & ~drop0) { 1'b1 } else { 1'b0 } >>
+        let fflags = ff0 | (p1_ok & ~drop1 & i1_fu_is_fpu) >>
+
+        /* Dirty FP state: either port committed a dirty-FP instruction */
+        let dfp = (ack0 & i0_dirty_fp) | (p1_ok & i1_dirty_fp) >>
+
+        /* Exception selection */
+        let esc = i0_csr_exc & ~i0_has_earlier_ex >>
+        let esi = i0_has_earlier_ex >>
+
+        /* Register all outputs (parallel updates) */
+        set ack0_q := ack0;
+        set ack1_q := p1_ok;
+        set we_gpr0_q := gpr0;
+        set we_gpr1_q := gpr1;
+        set we_fpr0_q := fpr0;
+        set we_fpr1_q := fpr1;
+        set commit_lsu_q := lsu_o;
+        set commit_csr_q := csr_o;
+        set amo_valid_q := cond_amo;
+        set fence_i_q := fi_o;
+        set fence_q := fe_o;
+        set sfence_vma_q := sf_o;
+        set flush_commit_q := flush_o;
+        set csr_fflags_q := fflags;
+        set use_csr_rdata_q := csr_o;
+        set csr_op_q := cond_csr;
+        set csr_wdata_q := cond_csr;
+        set dirty_fp_q := dfp;
+        set exc_sel_csr_q := esc;
+        set exc_sel_instr_q := esi;
+        set exc_suppress_q := halt >>
+
+        cycle 1 >>
+
+        /* Send registered outputs */
+        send io.res (*ack0_q) >>
+        send io.res_ack1 (*ack1_q) >>
+        send io.res_we_gpr0 (*we_gpr0_q) >>
+        send io.res_we_gpr1 (*we_gpr1_q) >>
+        send io.res_we_fpr0 (*we_fpr0_q) >>
+        send io.res_we_fpr1 (*we_fpr1_q) >>
+        send io.res_commit_lsu (*commit_lsu_q) >>
+        send io.res_commit_csr (*commit_csr_q) >>
+        send io.res_amo_valid (*amo_valid_q) >>
+        send io.res_fence_i (*fence_i_q) >>
+        send io.res_fence (*fence_q) >>
+        send io.res_sfence_vma (*sfence_vma_q) >>
+        send io.res_flush_commit (*flush_commit_q) >>
+        send io.res_csr_fflags (*csr_fflags_q) >>
+        send io.res_use_csr_rdata (*use_csr_rdata_q) >>
+        send io.res_csr_op (*csr_op_q) >>
+        send io.res_csr_wdata (*csr_wdata_q) >>
+        send io.res_dirty_fp (*dirty_fp_q) >>
+        send io.res_exc_sel_csr (*exc_sel_csr_q) >>
+        send io.res_exc_sel_instr (*exc_sel_instr_q) >>
+        send io.res_exc_suppress (*exc_suppress_q) >>
+
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan cs_le -- cs_ri : commit_ch;
+    spawn CommitStage(cs_le);
+    reg counter : logic[8];
+
+    /* Drive inputs and receive outputs */
+    loop {
+        send cs_ri.req_i0_valid (1'b1) >>
+        send cs_ri.req_i0_ex_valid (1'b0) >>
+        send cs_ri.req_i0_fu_is_store (1'b0) >>
+        send cs_ri.req_i0_fu_is_csr (1'b0) >>
+        send cs_ri.req_i0_fu_is_fpu (1'b0) >>
+        send cs_ri.req_i0_is_rd_fpr (1'b0) >>
+        send cs_ri.req_i0_is_amo (1'b0) >>
+        send cs_ri.req_i0_op_is_sfence (1'b0) >>
+        send cs_ri.req_i0_op_is_fence_i (1'b0) >>
+        send cs_ri.req_i0_op_is_fence (1'b0) >>
+        send cs_ri.req_i1_valid (1'b1) >>
+        send cs_ri.req_i1_ex_valid (1'b0) >>
+        send cs_ri.req_i1_fu_can_commit2 (1'b1) >>
+        send cs_ri.req_i1_is_rd_fpr (1'b0) >>
+        send cs_ri.req_i1_fu_is_fpu (1'b0) >>
+        send cs_ri.req_halt (1'b0) >>
+        send cs_ri.req_flush_dcache (1'b0) >>
+        send cs_ri.req_single_step (1'b0) >>
+        send cs_ri.req_drop0 (1'b0) >>
+        send cs_ri.req_drop1 (1'b0) >>
+        send cs_ri.req_amo_resp_ack (1'b0) >>
+        send cs_ri.req_csr_exc_valid (1'b0) >>
+        send cs_ri.req_commit_lsu_ready (1'b1) >>
+        send cs_ri.req_no_st_pending (1'b1) >>
+        send cs_ri.req_break_from_trigger (1'b0) >>
+        send cs_ri.req_i0_dirty_fp (1'b0) >>
+        send cs_ri.req_i1_dirty_fp (1'b0) >>
+        send cs_ri.req_i0_csr_exc (1'b0) >>
+        send cs_ri.req_i0_has_earlier_ex (1'b0) >>
+        let ack0 = recv cs_ri.res >>
+        let ack1 = recv cs_ri.res_ack1 >>
+        let gpr0 = recv cs_ri.res_we_gpr0 >>
+        let gpr1 = recv cs_ri.res_we_gpr1 >>
+        let fpr0 = recv cs_ri.res_we_fpr0 >>
+        let fpr1 = recv cs_ri.res_we_fpr1 >>
+        let lsu = recv cs_ri.res_commit_lsu >>
+        let csr = recv cs_ri.res_commit_csr >>
+        let amo = recv cs_ri.res_amo_valid >>
+        let fi = recv cs_ri.res_fence_i >>
+        let fe = recv cs_ri.res_fence >>
+        let sf = recv cs_ri.res_sfence_vma >>
+        let fl = recv cs_ri.res_flush_commit >>
+        let ff = recv cs_ri.res_csr_fflags >>
+        let ucr = recv cs_ri.res_use_csr_rdata >>
+        let cop = recv cs_ri.res_csr_op >>
+        let cwd = recv cs_ri.res_csr_wdata >>
+        let dfp = recv cs_ri.res_dirty_fp >>
+        let esc = recv cs_ri.res_exc_sel_csr >>
+        let esi = recv cs_ri.res_exc_sel_instr >>
+        let esu = recv cs_ri.res_exc_suppress >>
+        dprint"[Cycle %d] ack0=%d" (*counter, esu) >>
+        cycle 1
+    }
+
+    loop {
+        set counter := *counter + 8'd1
+    }
+
+    loop {
+        cycle 30 >>
+        dfinish
+    }
+}

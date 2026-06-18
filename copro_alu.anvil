@@ -1,0 +1,173 @@
+enum copro_op {
+    OP_NOP,
+    OP_ZERO,
+    OP_ADD_RS,
+    OP_DBL_A,
+    OP_DBL_B,
+    OP_ADD_BA,
+    OP_ADD3,
+    OP_SUB3,
+    OP_NADD3,
+    OP_NSUB3,
+    OP_RSVD10,
+    OP_RSVD11,
+    OP_RSVD12,
+    OP_RSVD13,
+    OP_RSVD14,
+    OP_ADDALL
+}
+
+/* Pure function: compute ALU result based on opcode */
+func copro_result(opcode, reg0, reg1, reg2, np3) {
+    match (opcode) {
+        copro_op::OP_ZERO => 32'd0,
+        copro_op::OP_ADD_RS => <(reg1 + reg0)::logic[32]>,
+        copro_op::OP_DBL_A => <(reg0 + reg0)::logic[32]>,
+        copro_op::OP_DBL_B => <(reg1 + reg1)::logic[32]>,
+        copro_op::OP_ADD_BA => <(reg1 + reg0)::logic[32]>,
+        copro_op::OP_ADD3 => if (np3 == 1'b1) { reg0 + reg1 + reg2 } else { reg0 + reg1 },
+        copro_op::OP_SUB3 => if (np3 == 1'b1) { reg0 - reg1 - reg2 } else { reg0 - reg1 },
+        copro_op::OP_NADD3 => if (np3 == 1'b1) { ~(reg0 + reg1 + reg2) } else { ~(reg0 + reg1) },
+        copro_op::OP_NSUB3 => if (np3 == 1'b1) { ~(reg0 - reg1 - reg2) } else { ~(reg0 - reg1) },
+        copro_op::OP_ADDALL => if (np3 == 1'b1) { <(reg2 + reg1 + reg0)::logic[32]> } else { <(reg1 + reg0)::logic[32]> },
+        _ => 32'd0
+    }
+}
+
+/* Pure function: compute valid output */
+func copro_valid(opcode) {
+    match (opcode) {
+        copro_op::OP_NOP => 1'b0,
+        _ => 1'b1
+    }
+}
+
+/* Pure function: compute write-enable output */
+func copro_we(opcode) {
+    match (opcode) {
+        copro_op::OP_NOP => 1'b0,
+        copro_op::OP_ZERO => 1'b0,
+        _ => 1'b1
+    }
+}
+
+/* Pure function: compute destination register */
+func copro_rd(opcode, rd) {
+    match (opcode) {
+        copro_op::OP_NOP => 5'd0,
+        copro_op::OP_ZERO => 5'd0,
+        copro_op::OP_ADDALL => 5'b01010,
+        _ => rd
+    }
+}
+
+/* Pure function: compute hartid output */
+func copro_hartid(opcode, hartid) {
+    match (opcode) {
+        copro_op::OP_NOP => 4'd0,
+        _ => hartid
+    }
+}
+
+/* Pure function: compute id output */
+func copro_id(opcode, id_val) {
+    match (opcode) {
+        copro_op::OP_NOP => 5'd0,
+        _ => id_val
+    }
+}
+
+/* Req/resp channel: inputs tied to response lifetime */
+chan copro_alu_ch {
+    left req_reg0 : (logic[32]@res),
+    left req_reg1 : (logic[32]@res),
+    left req_reg2 : (logic[32]@res),
+    left req_opcode : (copro_op@res),
+    left req_hartid : (logic[4]@res),
+    left req_id : (logic[5]@res),
+    left req_rd : (logic[5]@res),
+    left req_np3 : (logic@res),
+    right res : (logic[32]@#1),
+    right res_hartid : (logic[4]@#1),
+    right res_id : (logic[5]@#1),
+    right res_rd : (logic[5]@#1),
+    right res_valid : (logic@#1),
+    right res_we : (logic@#1)
+}
+
+/* Coprocessor ALU proc with registered outputs */
+proc CoproAlu(io : left copro_alu_ch) {
+    reg result_q : logic[32];
+    reg hartid_q : logic[4];
+    reg id_q : logic[5];
+    reg rd_q : logic[5];
+    reg valid_q : logic;
+    reg we_q : logic;
+
+    loop {
+        /* Receive all inputs (valid until res is sent) */
+        let r0 = recv io.req_reg0 >>
+        let r1 = recv io.req_reg1 >>
+        let r2 = recv io.req_reg2 >>
+        let op = recv io.req_opcode >>
+        let hid = recv io.req_hartid >>
+        let id = recv io.req_id >>
+        let rd = recv io.req_rd >>
+        let np3 = recv io.req_np3 >>
+
+        /* Compute via pure functions and register outputs (parallel) */
+        set result_q := call copro_result(op, r0, r1, r2, np3);
+        set hartid_q := call copro_hartid(op, hid);
+        set id_q := call copro_id(op, id);
+        set rd_q := call copro_rd(op, rd);
+        set valid_q := call copro_valid(op);
+        set we_q := call copro_we(op) >>
+
+        cycle 1 >>
+
+        /* Send registered outputs */
+        send io.res (*result_q) >>
+        send io.res_hartid (*hartid_q) >>
+        send io.res_id (*id_q) >>
+        send io.res_rd (*rd_q) >>
+        send io.res_valid (*valid_q) >>
+        send io.res_we (*we_q) >>
+
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan alu_le -- alu_ri : copro_alu_ch;
+    spawn CoproAlu(alu_le);
+    reg counter : logic[8];
+
+    /* Drive inputs and receive outputs */
+    loop {
+        send alu_ri.req_reg0 (<(*counter)::logic[32]>) >>
+        send alu_ri.req_reg1 (<(*counter)::logic[32]>) >>
+        send alu_ri.req_reg2 (<(*counter)::logic[32]>) >>
+        send alu_ri.req_opcode (copro_op::OP_ADD_RS) >>
+        send alu_ri.req_hartid (4'd1) >>
+        send alu_ri.req_id (5'd2) >>
+        send alu_ri.req_rd (5'd3) >>
+        send alu_ri.req_np3 (1'b0) >>
+        let result = recv alu_ri.res >>
+        let hid = recv alu_ri.res_hartid >>
+        let id = recv alu_ri.res_id >>
+        let rd = recv alu_ri.res_rd >>
+        let valid = recv alu_ri.res_valid >>
+        let we = recv alu_ri.res_we >>
+        dprint"[Cycle %d] we=%d" (*counter, we) >>
+        cycle 1
+    }
+
+    loop {
+        set counter := *counter + 8'd1
+    }
+
+    loop {
+        cycle 30 >>
+        dfinish
+    }
+}

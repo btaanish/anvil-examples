@@ -1,0 +1,244 @@
+enum port_sel { PORT0, PORT1, PORT2 }
+
+/* Pure func: check if port has any active request */
+func has_request(req) {
+    <(~(req == 8'd0))::logic>
+}
+
+/* Pure func: determine winning port (priority: 0 > 1 > 2) */
+func compute_winner(any0, any1) {
+    if any0 { port_sel::PORT0 }
+    else if any1 { port_sel::PORT1 }
+    else { port_sel::PORT2 }
+}
+
+/* Pure func: compute 3-bit grant vector {gnt2, gnt1, gnt0} */
+func compute_gnt(any0, any1) {
+    #{<(~any0 & ~any1)::logic>, <(~any0)::logic>, 1'b1}
+}
+
+/* Pure func: select tag from winning port using registered id_q */
+func select_tag(sel, t0, t1, t2) {
+    match (sel) {
+        port_sel::PORT0 => t0,
+        port_sel::PORT1 => t1,
+        _ => t2
+    }
+}
+
+/* Pure func: single-way hit detection (tag match gated by valid) */
+func tag_hit(tag, way_tag, way_valid) {
+    if (tag == way_tag) { way_valid } else { 1'b0 }
+}
+
+/* Req/resp channel: port inputs @res, arbitrated outputs @#1 */
+chan tag_cmp_ch {
+    /* Port 0 inputs */
+    left req_0 : (logic[8]@res),
+    left addr_0 : (logic[12]@res),
+    left wdata_0 : (logic[174]@res),
+    left we_0 : (logic@res),
+    left be_0 : (logic[30]@res),
+    left tag_0 : (logic[44]@res),
+    /* Port 1 inputs */
+    left req_1 : (logic[8]@res),
+    left addr_1 : (logic[12]@res),
+    left wdata_1 : (logic[174]@res),
+    left we_1 : (logic@res),
+    left be_1 : (logic[30]@res),
+    left tag_1 : (logic[44]@res),
+    /* Port 2 inputs */
+    left req_2 : (logic[8]@res),
+    left addr_2 : (logic[12]@res),
+    left wdata_2 : (logic[174]@res),
+    left we_2 : (logic@res),
+    left be_2 : (logic[30]@res),
+    left tag_2 : (logic[44]@res),
+    /* 8-way tag comparison data */
+    left rdata_tag_0 : (logic[44]@res),
+    left rdata_tag_1 : (logic[44]@res),
+    left rdata_tag_2 : (logic[44]@res),
+    left rdata_tag_3 : (logic[44]@res),
+    left rdata_tag_4 : (logic[44]@res),
+    left rdata_tag_5 : (logic[44]@res),
+    left rdata_tag_6 : (logic[44]@res),
+    left rdata_tag_7 : (logic[44]@res),
+    left rdata_valid_0 : (logic@res),
+    left rdata_valid_1 : (logic@res),
+    left rdata_valid_2 : (logic@res),
+    left rdata_valid_3 : (logic@res),
+    left rdata_valid_4 : (logic@res),
+    left rdata_valid_5 : (logic@res),
+    left rdata_valid_6 : (logic@res),
+    left rdata_valid_7 : (logic@res),
+    /* Arbitrated outputs */
+    right res : (logic[3]@#1),
+    right res_hit_way : (logic[8]@#1),
+    right res_req : (logic[8]@#1),
+    right res_addr : (logic[12]@#1),
+    right res_wdata : (logic[174]@#1),
+    right res_we : (logic@#1),
+    right res_be : (logic[30]@#1)
+}
+
+/* Tag comparator proc with registered outputs */
+proc TagCmp(io : left tag_cmp_ch) {
+    reg id_q : port_sel;
+    reg gnt_q : logic[3];
+    reg hit_way_q : logic[8];
+    reg req_q : logic[8];
+    reg addr_q : logic[12];
+    reg wdata_q : logic[174];
+    reg we_q : logic;
+    reg be_q : logic[30];
+
+    loop {
+        /* Receive all port inputs */
+        let r0 = recv io.req_0 >>
+        let r1 = recv io.req_1 >>
+        let r2 = recv io.req_2 >>
+        let a0 = recv io.addr_0 >>
+        let a1 = recv io.addr_1 >>
+        let a2 = recv io.addr_2 >>
+        let w0 = recv io.wdata_0 >>
+        let w1 = recv io.wdata_1 >>
+        let w2 = recv io.wdata_2 >>
+        let we0 = recv io.we_0 >>
+        let we1 = recv io.we_1 >>
+        let we2 = recv io.we_2 >>
+        let b0 = recv io.be_0 >>
+        let b1 = recv io.be_1 >>
+        let b2 = recv io.be_2 >>
+        let t0 = recv io.tag_0 >>
+        let t1 = recv io.tag_1 >>
+        let t2 = recv io.tag_2 >>
+        /* Receive 8-way tag data */
+        let rt0 = recv io.rdata_tag_0 >>
+        let rt1 = recv io.rdata_tag_1 >>
+        let rt2 = recv io.rdata_tag_2 >>
+        let rt3 = recv io.rdata_tag_3 >>
+        let rt4 = recv io.rdata_tag_4 >>
+        let rt5 = recv io.rdata_tag_5 >>
+        let rt6 = recv io.rdata_tag_6 >>
+        let rt7 = recv io.rdata_tag_7 >>
+        let rv0 = recv io.rdata_valid_0 >>
+        let rv1 = recv io.rdata_valid_1 >>
+        let rv2 = recv io.rdata_valid_2 >>
+        let rv3 = recv io.rdata_valid_3 >>
+        let rv4 = recv io.rdata_valid_4 >>
+        let rv5 = recv io.rdata_valid_5 >>
+        let rv6 = recv io.rdata_valid_6 >>
+        let rv7 = recv io.rdata_valid_7 >>
+
+        /* Priority arbitration */
+        let any0 = call has_request(r0) >>
+        let any1 = call has_request(r1) >>
+
+        /* Mux outputs from winning port */
+        let req_out = if any0 { r0 } else if any1 { r1 } else { r2 } >>
+        let addr_out = if any0 { a0 } else if any1 { a1 } else { a2 } >>
+        let wdata_out = if any0 { w0 } else if any1 { w1 } else { w2 } >>
+        let we_out = if any0 { we0 } else if any1 { we1 } else { we2 } >>
+        let be_out = if any0 { b0 } else if any1 { b1 } else { b2 } >>
+
+        /* Tag selection using registered port select from previous cycle */
+        let sel_tag = call select_tag(*id_q, t0, t1, t2) >>
+
+        /* 8-way hit detection: compare selected tag against each way */
+        let h0 = call tag_hit(sel_tag, rt0, rv0) >>
+        let h1 = call tag_hit(sel_tag, rt1, rv1) >>
+        let h2 = call tag_hit(sel_tag, rt2, rv2) >>
+        let h3 = call tag_hit(sel_tag, rt3, rv3) >>
+        let h4 = call tag_hit(sel_tag, rt4, rv4) >>
+        let h5 = call tag_hit(sel_tag, rt5, rv5) >>
+        let h6 = call tag_hit(sel_tag, rt6, rv6) >>
+        let h7 = call tag_hit(sel_tag, rt7, rv7) >>
+
+        /* Register all outputs (parallel updates) */
+        set id_q := call compute_winner(any0, any1);
+        set gnt_q := call compute_gnt(any0, any1);
+        set hit_way_q := #{h7, h6, h5, h4, h3, h2, h1, h0};
+        set req_q := req_out;
+        set addr_q := addr_out;
+        set wdata_q := wdata_out;
+        set we_q := we_out;
+        set be_q := be_out >>
+
+        cycle 1 >>
+
+        /* Send registered outputs */
+        send io.res (*gnt_q) >>
+        send io.res_hit_way (*hit_way_q) >>
+        send io.res_req (*req_q) >>
+        send io.res_addr (*addr_q) >>
+        send io.res_wdata (*wdata_q) >>
+        send io.res_we (*we_q) >>
+        send io.res_be (*be_q) >>
+
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan ch_le -- ch_ri : tag_cmp_ch;
+    spawn TagCmp(ch_le);
+    reg counter : logic[8];
+
+    /* Drive port inputs and receive arbitrated outputs */
+    loop {
+        send ch_ri.req_0 (8'd1) >>
+        send ch_ri.req_1 (8'd0) >>
+        send ch_ri.req_2 (8'd0) >>
+        send ch_ri.addr_0 (12'd100) >>
+        send ch_ri.addr_1 (12'd0) >>
+        send ch_ri.addr_2 (12'd0) >>
+        send ch_ri.wdata_0 (174'd0) >>
+        send ch_ri.wdata_1 (174'd0) >>
+        send ch_ri.wdata_2 (174'd0) >>
+        send ch_ri.we_0 (1'b0) >>
+        send ch_ri.we_1 (1'b0) >>
+        send ch_ri.we_2 (1'b0) >>
+        send ch_ri.be_0 (30'd0) >>
+        send ch_ri.be_1 (30'd0) >>
+        send ch_ri.be_2 (30'd0) >>
+        send ch_ri.tag_0 (44'd42) >>
+        send ch_ri.tag_1 (44'd0) >>
+        send ch_ri.tag_2 (44'd0) >>
+        send ch_ri.rdata_tag_0 (44'd42) >>
+        send ch_ri.rdata_tag_1 (44'd0) >>
+        send ch_ri.rdata_tag_2 (44'd0) >>
+        send ch_ri.rdata_tag_3 (44'd0) >>
+        send ch_ri.rdata_tag_4 (44'd0) >>
+        send ch_ri.rdata_tag_5 (44'd0) >>
+        send ch_ri.rdata_tag_6 (44'd0) >>
+        send ch_ri.rdata_tag_7 (44'd0) >>
+        send ch_ri.rdata_valid_0 (1'b1) >>
+        send ch_ri.rdata_valid_1 (1'b0) >>
+        send ch_ri.rdata_valid_2 (1'b0) >>
+        send ch_ri.rdata_valid_3 (1'b0) >>
+        send ch_ri.rdata_valid_4 (1'b0) >>
+        send ch_ri.rdata_valid_5 (1'b0) >>
+        send ch_ri.rdata_valid_6 (1'b0) >>
+        send ch_ri.rdata_valid_7 (1'b0) >>
+        let _gnt = recv ch_ri.res >>
+        let _hit = recv ch_ri.res_hit_way >>
+        let _req = recv ch_ri.res_req >>
+        let _addr = recv ch_ri.res_addr >>
+        let _wdata = recv ch_ri.res_wdata >>
+        let _we = recv ch_ri.res_we >>
+        let be = recv ch_ri.res_be >>
+        dprint"[Cycle %d] be=%d" (*counter, be) >>
+        cycle 1
+    }
+
+    /* Counter */
+    loop {
+        set counter := *counter + 8'd1
+    }
+
+    /* Timeout */
+    loop {
+        cycle 30 >>
+        dfinish
+    }
+}

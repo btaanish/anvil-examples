@@ -1,0 +1,96 @@
+enum pmp_mode { OFF, TOR, NA4, NAPOT }
+
+/* Pure function: 54-bit trailing zero counter via binary decomposition.
+   Pad to 64 bits (upper 10 set to 1 to cap result at 54), then
+   6-level bisection: each level checks if lower half is all-zero. */
+func trailing_zeros(nc) {
+    let v = <(nc)::logic[64]> | 64'hFFC0000000000000 >>
+    let z5 = if (v[0+:32] == 32'd0) { 1'b1 } else { 1'b0 } >>
+    let v4 = if (z5 == 1'b1) { v[32+:32] } else { v[0+:32] } >>
+    let z4 = if (v4[0+:16] == 16'd0) { 1'b1 } else { 1'b0 } >>
+    let v3 = if (z4 == 1'b1) { v4[16+:16] } else { v4[0+:16] } >>
+    let z3 = if (v3[0+:8] == 8'd0) { 1'b1 } else { 1'b0 } >>
+    let v2 = if (z3 == 1'b1) { v3[8+:8] } else { v3[0+:8] } >>
+    let z2 = if (v2[0+:4] == 4'd0) { 1'b1 } else { 1'b0 } >>
+    let v1 = if (z2 == 1'b1) { v2[4+:4] } else { v2[0+:4] } >>
+    let z1 = if (v1[0+:2] == 2'd0) { 1'b1 } else { 1'b0 } >>
+    let v0 = if (z1 == 1'b1) { v1[2+:2] } else { v1[0+:2] } >>
+    let z0 = if (v0[0] == 1'b0) { 1'b1 } else { 1'b0 } >>
+    #{z5, z4, z3, z2, z1, z0}
+}
+
+/* Pure function: compute PMP match based on mode using match */
+func pmp_match(mode, addr, mask, base, lower, upper) {
+    match (mode) {
+        pmp_mode::TOR =>
+            if (addr >= lower) {
+                if (addr < upper) { 1'b1 } else { 1'b0 }
+            } else { 1'b0 },
+        pmp_mode::NAPOT =>
+            if ((addr & mask) == base) { 1'b1 } else { 1'b0 },
+        _ => 1'b0
+    }
+}
+
+/* Req/resp channel: all inputs tied to response lifetime */
+chan pmp_ch {
+    left req_addr : (logic[56]@res_match),
+    left req_conf_addr : (logic[54]@res_match),
+    left req_conf_addr_prev : (logic[54]@res_match),
+    left req_mode : (pmp_mode@res_match),
+    right res_match : (logic@#1)
+}
+
+proc PmpEntry(io : left pmp_ch) {
+    reg match_q : logic;
+
+    loop {
+        let addr = recv io.req_addr >>
+        let conf_addr = recv io.req_conf_addr >>
+        let conf_addr_prev = recv io.req_conf_addr_prev >>
+        let mode = recv io.req_mode >>
+
+        let not_conf = ~conf_addr >>
+        let trail_ones = call trailing_zeros(not_conf) >>
+        let size = trail_ones + 6'd3 >>
+        let mask = 56'hFFFFFFFFFFFFFF << <(size)::logic[56]> >>
+        let conf_ext = <(conf_addr)::logic[56]> >>
+        let base = (conf_ext << 56'd2) & mask >>
+        let prev_ext = <(conf_addr_prev)::logic[56]> >>
+        let lower = prev_ext << 56'd2 >>
+        let upper = conf_ext << 56'd2 >>
+
+        set match_q := call pmp_match(mode, addr, mask, base, lower, upper) >>
+
+        cycle 1 >>
+
+        send io.res_match (*match_q) >>
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan pmp_le -- pmp_ri : pmp_ch;
+    spawn PmpEntry(pmp_le);
+    reg counter : logic[8];
+
+    /* Drive inputs and receive match output */
+    loop {
+        send pmp_ri.req_addr (56'd4096) >>
+        send pmp_ri.req_conf_addr (54'd1024) >>
+        send pmp_ri.req_conf_addr_prev (54'd0) >>
+        send pmp_ri.req_mode (pmp_mode::TOR) >>
+        let m = recv pmp_ri.res_match >>
+        dprint"[Cycle %d] match=%d" (*counter, m) >>
+        cycle 1
+    }
+
+    loop {
+        set counter := *counter + 8'd1
+    }
+
+    loop {
+        cycle 20 >>
+        dfinish
+    }
+}

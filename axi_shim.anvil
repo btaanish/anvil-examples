@@ -1,0 +1,137 @@
+enum axi_shim_state {
+    IDLE,
+    WAIT_AW_READY,
+    WAIT_LAST_W_READY
+}
+
+chan axi_shim_ch {
+    left wr_req : (logic@#1) @#1 - @#1,
+    left wr_single : (logic@#1) @#1 - @#1,
+    left aw_ready : (logic@#1) @#1 - @#1,
+    left w_ready : (logic@#1) @#1 - @#1,
+    right aw_valid : (logic@#1) @#1 - @#1,
+    right w_valid : (logic@#1) @#1 - @#1,
+    right wr_gnt : (logic@#1) @#1 - @#1,
+    right wr_cnt_clr : (logic@#1) @#1 - @#1
+}
+
+/* Pure function: compute next FSM state */
+func compute_next_state(st, wr_req, wr_single, aw_ready, w_ready) {
+    match (st) {
+        axi_shim_state::IDLE =>
+            if (wr_req == 1'b1 && wr_single == 1'b1 && aw_ready == 1'b0 && w_ready == 1'b1) {
+                axi_shim_state::WAIT_AW_READY
+            } else if (wr_req == 1'b1 && wr_single == 1'b1 && aw_ready == 1'b1 && w_ready == 1'b0) {
+                axi_shim_state::WAIT_LAST_W_READY
+            } else {
+                axi_shim_state::IDLE
+            },
+        axi_shim_state::WAIT_AW_READY =>
+            if (aw_ready == 1'b1) {
+                axi_shim_state::IDLE
+            } else {
+                axi_shim_state::WAIT_AW_READY
+            },
+        axi_shim_state::WAIT_LAST_W_READY =>
+            if (w_ready == 1'b1) {
+                axi_shim_state::IDLE
+            } else {
+                axi_shim_state::WAIT_LAST_W_READY
+            },
+        _ => axi_shim_state::IDLE
+    }
+}
+
+/* Pure function: compute aw_valid output */
+func compute_aw_valid(st, wr_req) {
+    match (st) {
+        axi_shim_state::IDLE => wr_req,
+        axi_shim_state::WAIT_AW_READY => 1'b1,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: compute w_valid output */
+func compute_w_valid(st, wr_req) {
+    match (st) {
+        axi_shim_state::IDLE => wr_req,
+        axi_shim_state::WAIT_LAST_W_READY => 1'b1,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: compute wr_gnt output */
+func compute_wr_gnt(st, wr_req, wr_single, aw_ready, w_ready) {
+    match (st) {
+        axi_shim_state::IDLE =>
+            if (wr_req == 1'b1 && wr_single == 1'b1 && aw_ready == 1'b1 && w_ready == 1'b1) {
+                1'b1
+            } else {
+                1'b0
+            },
+        axi_shim_state::WAIT_AW_READY => aw_ready,
+        axi_shim_state::WAIT_LAST_W_READY => w_ready,
+        _ => 1'b0
+    }
+}
+
+/* Pure function: compute wr_cnt_clr output */
+func compute_wr_cnt_clr(st, wr_req, wr_single, w_ready) {
+    match (st) {
+        axi_shim_state::IDLE =>
+            if (wr_req == 1'b1 && wr_single == 1'b1) {
+                1'b1
+            } else {
+                1'b0
+            },
+        axi_shim_state::WAIT_LAST_W_READY => w_ready,
+        _ => 1'b0
+    }
+}
+
+proc AxiShim(ep : left axi_shim_ch) {
+    reg state : axi_shim_state;
+    loop {
+        let wr_req = recv ep.wr_req >>
+        let wr_single = recv ep.wr_single >>
+        let aw_ready = recv ep.aw_ready >>
+        let w_ready = recv ep.w_ready >>
+        let st = *state >>
+        set state := call compute_next_state(st, wr_req, wr_single, aw_ready, w_ready);
+        send ep.aw_valid (call compute_aw_valid(st, wr_req)) >>
+        send ep.w_valid (call compute_w_valid(st, wr_req)) >>
+        send ep.wr_gnt (call compute_wr_gnt(st, wr_req, wr_single, aw_ready, w_ready)) >>
+        send ep.wr_cnt_clr (call compute_wr_cnt_clr(st, wr_req, wr_single, w_ready)) >>
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan ep_le -- ep_ri : axi_shim_ch;
+    spawn AxiShim(ep_le);
+    reg counter : logic[8];
+    reg wr_req_val : logic;
+    reg wr_single_val : logic;
+    reg aw_ready_val : logic;
+    reg w_ready_val : logic;
+    loop {
+        send ep_ri.wr_req (*wr_req_val) >>
+        send ep_ri.wr_single (*wr_single_val) >>
+        send ep_ri.aw_ready (*aw_ready_val) >>
+        send ep_ri.w_ready (*w_ready_val) >>
+        let aw_v = recv ep_ri.aw_valid >>
+        let w_v = recv ep_ri.w_valid >>
+        let gnt = recv ep_ri.wr_gnt >>
+        let cnt_clr = recv ep_ri.wr_cnt_clr >>
+        dprint"[Cycle %d] aw_valid=%b w_valid=%b gnt=%b cnt_clr=%b" (*counter, aw_v, w_v, gnt, cnt_clr) >>
+        set wr_req_val := ~(*wr_req_val) >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+    loop {
+        cycle 20 >>
+        dfinish
+    }
+}

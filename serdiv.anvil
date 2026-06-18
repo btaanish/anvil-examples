@@ -1,0 +1,142 @@
+enum serdiv_state {
+    IDLE,
+    DIVIDE,
+    FINISH
+}
+
+chan serdiv_ch {
+    left id_i : (logic[3]@#1) @#1 - @#1,
+    left opcode_i : (logic[2]@#1) @#1 - @#1,
+    left in_vld_i : (logic@#1) @#1 - @#1,
+    left flush_i : (logic@#1) @#1 - @#1,
+    left out_rdy_i : (logic@#1) @#1 - @#1,
+    left result_i : (logic[64]@#1) @#1 - @#1,
+    left div_by_zero_i : (logic@#1) @#1 - @#1,
+    left overflow_i : (logic@#1) @#1 - @#1,
+    right in_rdy_o : (logic@#1) @#1 - @#1,
+    right out_vld_o : (logic@#1) @#1 - @#1,
+    right id_o : (logic[3]@#1) @#1 - @#1,
+    right res_o : (logic[64]@#1) @#1 - @#1
+}
+
+/* Pure function: compute next FSM state */
+func compute_next_state(st, in_vld, flush, out_rdy) {
+    if flush { serdiv_state::IDLE }
+    else {
+        match (st) {
+            serdiv_state::IDLE =>
+                if in_vld { serdiv_state::DIVIDE }
+                else { serdiv_state::IDLE },
+            serdiv_state::DIVIDE => serdiv_state::FINISH,
+            serdiv_state::FINISH =>
+                if out_rdy { serdiv_state::IDLE }
+                else { serdiv_state::FINISH },
+            _ => serdiv_state::IDLE
+        }
+    }
+}
+
+/* Pure function: compute in_rdy output (0 when accepting in IDLE) */
+func compute_in_rdy(st, in_vld) {
+    match (st) {
+        serdiv_state::IDLE =>
+            if in_vld { 1'b0 }
+            else { 1'b1 },
+        _ => 1'b0
+    }
+}
+
+/* Pure function: compute out_vld output */
+func compute_out_vld(st) {
+    match (st) {
+        serdiv_state::FINISH => 1'b1,
+        _ => 1'b0
+    }
+}
+
+proc SerDiv(ep : left serdiv_ch) {
+    reg state : serdiv_state;
+    reg id_q : logic[3];
+    reg result_q : logic[64];
+    reg cnt_q : logic[6];
+    loop {
+        let id_in = recv ep.id_i >>
+        let opcode = recv ep.opcode_i >>
+        let in_vld = recv ep.in_vld_i >>
+        let flush = recv ep.flush_i >>
+        let out_rdy = recv ep.out_rdy_i >>
+        let result_in = recv ep.result_i >>
+        let div_by_zero = recv ep.div_by_zero_i >>
+        let overflow = recv ep.overflow_i >>
+        let st = *state >>
+        let cnt = *cnt_q >>
+
+        /* Compute register next values */
+        let is_idle_vld = match (st) {
+            serdiv_state::IDLE => in_vld,
+            _ => 1'b0
+        } >>
+        let id_n = if is_idle_vld { id_in } else { *id_q } >>
+        let result_n = if is_idle_vld { result_in } else { *result_q } >>
+        let cnt_n = if is_idle_vld { 6'd1 }
+                    else {
+                        match (st) {
+                            serdiv_state::DIVIDE =>
+                                if (cnt != 6'd0) { cnt - 6'd1 }
+                                else { cnt },
+                            _ => cnt
+                        }
+                    } >>
+
+        /* State transition and register updates (parallel) */
+        set state := call compute_next_state(st, in_vld, flush, out_rdy);
+        set id_q := id_n;
+        set result_q := result_n;
+        set cnt_q := cnt_n;
+
+        /* Outputs */
+        send ep.in_rdy_o (call compute_in_rdy(st, in_vld)) >>
+        send ep.out_vld_o (call compute_out_vld(st)) >>
+        send ep.id_o (*id_q) >>
+        send ep.res_o (*result_q) >>
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan ep_le -- ep_ri : serdiv_ch;
+    spawn SerDiv(ep_le);
+    reg counter : logic[8];
+    reg id_val : logic[3];
+    reg opcode_val : logic[2];
+    reg in_vld_val : logic;
+    reg flush_val : logic;
+    reg out_rdy_val : logic;
+    reg result_val : logic[64];
+    reg dbz_val : logic;
+    reg ovf_val : logic;
+    loop {
+        send ep_ri.id_i (*id_val) >>
+        send ep_ri.opcode_i (*opcode_val) >>
+        send ep_ri.in_vld_i (*in_vld_val) >>
+        send ep_ri.flush_i (*flush_val) >>
+        send ep_ri.out_rdy_i (*out_rdy_val) >>
+        send ep_ri.result_i (*result_val) >>
+        send ep_ri.div_by_zero_i (*dbz_val) >>
+        send ep_ri.overflow_i (*ovf_val) >>
+        let rdy = recv ep_ri.in_rdy_o >>
+        let vld = recv ep_ri.out_vld_o >>
+        let id_out = recv ep_ri.id_o >>
+        let res_out = recv ep_ri.res_o >>
+        dprint"[Cycle %d] in_rdy=%b out_vld=%b id=%d res=%d" (*counter, rdy, vld, id_out, res_out) >>
+        set in_vld_val := ~(*in_vld_val) >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+    loop {
+        cycle 20 >>
+        dfinish
+    }
+}
