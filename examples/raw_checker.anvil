@@ -91,13 +91,81 @@ func priority_encode(b0, b1, b2, b3, b4, b5, b6, b7) {
     else { 3'd0 }
 }
 
-proc RawChecker(io : left raw_checker_ch) {
+proc RawCheckerMulti(io : left raw_checker_ch) {
+    /* Stage 0: latched inputs */
+    reg rs_q : logic[5];
+    reg rs_fpr_q : logic;
+
+    reg rd_q_0 : logic[5];
+    reg rd_q_1 : logic[5];
+    reg rd_q_2 : logic[5];
+    reg rd_q_3 : logic[5];
+    reg rd_q_4 : logic[5];
+    reg rd_q_5 : logic[5];
+    reg rd_q_6 : logic[5];
+    reg rd_q_7 : logic[5];
+
+    reg rd_fpr_q_0 : logic;
+    reg rd_fpr_q_1 : logic;
+    reg rd_fpr_q_2 : logic;
+    reg rd_fpr_q_3 : logic;
+    reg rd_fpr_q_4 : logic;
+    reg rd_fpr_q_5 : logic;
+    reg rd_fpr_q_6 : logic;
+    reg rd_fpr_q_7 : logic;
+
+    reg still_issued_q_0 : logic;
+    reg still_issued_q_1 : logic;
+    reg still_issued_q_2 : logic;
+    reg still_issued_q_3 : logic;
+    reg still_issued_q_4 : logic;
+    reg still_issued_q_5 : logic;
+    reg still_issued_q_6 : logic;
+    reg still_issued_q_7 : logic;
+
+    reg issue_pointer_q : logic[3];
+
+    /* Stage 1: match results */
+    reg match_q_0 : logic;
+    reg match_q_1 : logic;
+    reg match_q_2 : logic;
+    reg match_q_3 : logic;
+    reg match_q_4 : logic;
+    reg match_q_5 : logic;
+    reg match_q_6 : logic;
+    reg match_q_7 : logic;
+
+    /* Stage 2: before/after partition bits */
+    reg before_q_0 : logic;
+    reg before_q_1 : logic;
+    reg before_q_2 : logic;
+    reg before_q_3 : logic;
+    reg before_q_4 : logic;
+    reg before_q_5 : logic;
+    reg before_q_6 : logic;
+    reg before_q_7 : logic;
+
+    reg after_q_0 : logic;
+    reg after_q_1 : logic;
+    reg after_q_2 : logic;
+    reg after_q_3 : logic;
+    reg after_q_4 : logic;
+    reg after_q_5 : logic;
+    reg after_q_6 : logic;
+    reg after_q_7 : logic;
+
+    /* Stage 3/4: encoded result */
     reg idx_q : logic[3];
     reg valid_q : logic;
+
     loop {
-        /* Receive all input fields */
+        /*
+         * Cycle 0:
+         * Receive request and latch all input fields.
+         */
         let rs_i = recv io.rs_i >>
         let rs_fpr_i = recv io.rs_fpr_i >>
+
         let rd_i_0 = recv io.rd_i_0 >>
         let rd_i_1 = recv io.rd_i_1 >>
         let rd_i_2 = recv io.rd_i_2 >>
@@ -106,6 +174,7 @@ proc RawChecker(io : left raw_checker_ch) {
         let rd_i_5 = recv io.rd_i_5 >>
         let rd_i_6 = recv io.rd_i_6 >>
         let rd_i_7 = recv io.rd_i_7 >>
+
         let rd_fpr_i_0 = recv io.rd_fpr_i_0 >>
         let rd_fpr_i_1 = recv io.rd_fpr_i_1 >>
         let rd_fpr_i_2 = recv io.rd_fpr_i_2 >>
@@ -114,6 +183,7 @@ proc RawChecker(io : left raw_checker_ch) {
         let rd_fpr_i_5 = recv io.rd_fpr_i_5 >>
         let rd_fpr_i_6 = recv io.rd_fpr_i_6 >>
         let rd_fpr_i_7 = recv io.rd_fpr_i_7 >>
+
         let still_issued_i_0 = recv io.still_issued_i_0 >>
         let still_issued_i_1 = recv io.still_issued_i_1 >>
         let still_issued_i_2 = recv io.still_issued_i_2 >>
@@ -122,54 +192,161 @@ proc RawChecker(io : left raw_checker_ch) {
         let still_issued_i_5 = recv io.still_issued_i_5 >>
         let still_issued_i_6 = recv io.still_issued_i_6 >>
         let still_issued_i_7 = recv io.still_issued_i_7 >>
+
         let issue_pointer_i = recv io.issue_pointer_i >>
 
-        /* 8-way parallel match detection */
-        let match0 = call check_match(rs_i, rs_fpr_i, rd_i_0, rd_fpr_i_0, still_issued_i_0) >>
-        let match1 = call check_match(rs_i, rs_fpr_i, rd_i_1, rd_fpr_i_1, still_issued_i_1) >>
-        let match2 = call check_match(rs_i, rs_fpr_i, rd_i_2, rd_fpr_i_2, still_issued_i_2) >>
-        let match3 = call check_match(rs_i, rs_fpr_i, rd_i_3, rd_fpr_i_3, still_issued_i_3) >>
-        let match4 = call check_match(rs_i, rs_fpr_i, rd_i_4, rd_fpr_i_4, still_issued_i_4) >>
-        let match5 = call check_match(rs_i, rs_fpr_i, rd_i_5, rd_fpr_i_5, still_issued_i_5) >>
-        let match6 = call check_match(rs_i, rs_fpr_i, rd_i_6, rd_fpr_i_6, still_issued_i_6) >>
-        let match7 = call check_match(rs_i, rs_fpr_i, rd_i_7, rd_fpr_i_7, still_issued_i_7) >>
+        set rs_q := rs_i >>
+        set rs_fpr_q := rs_fpr_i >>
 
-        /* Before/after partition based on issue_pointer */
-        let before0 = <((3'd0 < issue_pointer_i) & match0)::logic> >>
-        let before1 = <((3'd1 < issue_pointer_i) & match1)::logic> >>
-        let before2 = <((3'd2 < issue_pointer_i) & match2)::logic> >>
-        let before3 = <((3'd3 < issue_pointer_i) & match3)::logic> >>
-        let before4 = <((3'd4 < issue_pointer_i) & match4)::logic> >>
-        let before5 = <((3'd5 < issue_pointer_i) & match5)::logic> >>
-        let before6 = <((3'd6 < issue_pointer_i) & match6)::logic> >>
-        let before7 = <((3'd7 < issue_pointer_i) & match7)::logic> >>
+        set rd_q_0 := rd_i_0 >>
+        set rd_q_1 := rd_i_1 >>
+        set rd_q_2 := rd_i_2 >>
+        set rd_q_3 := rd_i_3 >>
+        set rd_q_4 := rd_i_4 >>
+        set rd_q_5 := rd_i_5 >>
+        set rd_q_6 := rd_i_6 >>
+        set rd_q_7 := rd_i_7 >>
 
-        let after0 = <((3'd0 >= issue_pointer_i) & match0)::logic> >>
-        let after1 = <((3'd1 >= issue_pointer_i) & match1)::logic> >>
-        let after2 = <((3'd2 >= issue_pointer_i) & match2)::logic> >>
-        let after3 = <((3'd3 >= issue_pointer_i) & match3)::logic> >>
-        let after4 = <((3'd4 >= issue_pointer_i) & match4)::logic> >>
-        let after5 = <((3'd5 >= issue_pointer_i) & match5)::logic> >>
-        let after6 = <((3'd6 >= issue_pointer_i) & match6)::logic> >>
-        let after7 = <((3'd7 >= issue_pointer_i) & match7)::logic> >>
+        set rd_fpr_q_0 := rd_fpr_i_0 >>
+        set rd_fpr_q_1 := rd_fpr_i_1 >>
+        set rd_fpr_q_2 := rd_fpr_i_2 >>
+        set rd_fpr_q_3 := rd_fpr_i_3 >>
+        set rd_fpr_q_4 := rd_fpr_i_4 >>
+        set rd_fpr_q_5 := rd_fpr_i_5 >>
+        set rd_fpr_q_6 := rd_fpr_i_6 >>
+        set rd_fpr_q_7 := rd_fpr_i_7 >>
 
-        /* Dual priority encoders */
-        let last_before_idx = call priority_encode(before0, before1, before2, before3, before4, before5, before6, before7) >>
-        let last_after_idx = call priority_encode(after0, after1, after2, after3, after4, after5, after6, after7) >>
+        set still_issued_q_0 := still_issued_i_0 >>
+        set still_issued_q_1 := still_issued_i_1 >>
+        set still_issued_q_2 := still_issued_i_2 >>
+        set still_issued_q_3 := still_issued_i_3 >>
+        set still_issued_q_4 := still_issued_i_4 >>
+        set still_issued_q_5 := still_issued_i_5 >>
+        set still_issued_q_6 := still_issued_i_6 >>
+        set still_issued_q_7 := still_issued_i_7 >>
 
-        let any_before = before0 | before1 | before2 | before3 | before4 | before5 | before6 | before7 >>
-        let any_match = match0 | match1 | match2 | match3 | match4 | match5 | match6 | match7 >>
-        let rs_is_gpr0 = <((rs_i == 5'd0) & ~rs_fpr_i)::logic> >>
+        set issue_pointer_q := issue_pointer_i >>
 
-        /* Classify partition result and dispatch via match */
+        cycle 1 >>
+
+        /*
+         * Cycle 1:
+         * Compute match bits.
+         */
+        let match0 = call check_match(*rs_q, *rs_fpr_q, *rd_q_0, *rd_fpr_q_0, *still_issued_q_0) >>
+        let match1 = call check_match(*rs_q, *rs_fpr_q, *rd_q_1, *rd_fpr_q_1, *still_issued_q_1) >>
+        let match2 = call check_match(*rs_q, *rs_fpr_q, *rd_q_2, *rd_fpr_q_2, *still_issued_q_2) >>
+        let match3 = call check_match(*rs_q, *rs_fpr_q, *rd_q_3, *rd_fpr_q_3, *still_issued_q_3) >>
+        let match4 = call check_match(*rs_q, *rs_fpr_q, *rd_q_4, *rd_fpr_q_4, *still_issued_q_4) >>
+        let match5 = call check_match(*rs_q, *rs_fpr_q, *rd_q_5, *rd_fpr_q_5, *still_issued_q_5) >>
+        let match6 = call check_match(*rs_q, *rs_fpr_q, *rd_q_6, *rd_fpr_q_6, *still_issued_q_6) >>
+        let match7 = call check_match(*rs_q, *rs_fpr_q, *rd_q_7, *rd_fpr_q_7, *still_issued_q_7) >>
+
+        set match_q_0 := match0 >>
+        set match_q_1 := match1 >>
+        set match_q_2 := match2 >>
+        set match_q_3 := match3 >>
+        set match_q_4 := match4 >>
+        set match_q_5 := match5 >>
+        set match_q_6 := match6 >>
+        set match_q_7 := match7 >>
+
+        cycle 1 >>
+
+        /*
+         * Cycle 2:
+         * Partition matches into before/after groups using issue_pointer.
+         */
+        let before0 = <((3'd0 < *issue_pointer_q) & *match_q_0)::logic> >>
+        let before1 = <((3'd1 < *issue_pointer_q) & *match_q_1)::logic> >>
+        let before2 = <((3'd2 < *issue_pointer_q) & *match_q_2)::logic> >>
+        let before3 = <((3'd3 < *issue_pointer_q) & *match_q_3)::logic> >>
+        let before4 = <((3'd4 < *issue_pointer_q) & *match_q_4)::logic> >>
+        let before5 = <((3'd5 < *issue_pointer_q) & *match_q_5)::logic> >>
+        let before6 = <((3'd6 < *issue_pointer_q) & *match_q_6)::logic> >>
+        let before7 = <((3'd7 < *issue_pointer_q) & *match_q_7)::logic> >>
+
+        let after0 = <((3'd0 >= *issue_pointer_q) & *match_q_0)::logic> >>
+        let after1 = <((3'd1 >= *issue_pointer_q) & *match_q_1)::logic> >>
+        let after2 = <((3'd2 >= *issue_pointer_q) & *match_q_2)::logic> >>
+        let after3 = <((3'd3 >= *issue_pointer_q) & *match_q_3)::logic> >>
+        let after4 = <((3'd4 >= *issue_pointer_q) & *match_q_4)::logic> >>
+        let after5 = <((3'd5 >= *issue_pointer_q) & *match_q_5)::logic> >>
+        let after6 = <((3'd6 >= *issue_pointer_q) & *match_q_6)::logic> >>
+        let after7 = <((3'd7 >= *issue_pointer_q) & *match_q_7)::logic> >>
+
+        set before_q_0 := before0 >>
+        set before_q_1 := before1 >>
+        set before_q_2 := before2 >>
+        set before_q_3 := before3 >>
+        set before_q_4 := before4 >>
+        set before_q_5 := before5 >>
+        set before_q_6 := before6 >>
+        set before_q_7 := before7 >>
+
+        set after_q_0 := after0 >>
+        set after_q_1 := after1 >>
+        set after_q_2 := after2 >>
+        set after_q_3 := after3 >>
+        set after_q_4 := after4 >>
+        set after_q_5 := after5 >>
+        set after_q_6 := after6 >>
+        set after_q_7 := after7 >>
+
+        cycle 1 >>
+
+        /*
+         * Cycle 3:
+         * Priority encode, classify, and register final result.
+         */
+        let last_before_idx = call priority_encode(
+            *before_q_0,
+            *before_q_1,
+            *before_q_2,
+            *before_q_3,
+            *before_q_4,
+            *before_q_5,
+            *before_q_6,
+            *before_q_7
+        ) >>
+
+        let last_after_idx = call priority_encode(
+            *after_q_0,
+            *after_q_1,
+            *after_q_2,
+            *after_q_3,
+            *after_q_4,
+            *after_q_5,
+            *after_q_6,
+            *after_q_7
+        ) >>
+
+        let any_before =
+            *before_q_0 | *before_q_1 | *before_q_2 | *before_q_3 |
+            *before_q_4 | *before_q_5 | *before_q_6 | *before_q_7 >>
+
+        let any_match =
+            *match_q_0 | *match_q_1 | *match_q_2 | *match_q_3 |
+            *match_q_4 | *match_q_5 | *match_q_6 | *match_q_7 >>
+
+        let rs_is_gpr0 = <((*rs_q == 5'd0) & ~(*rs_fpr_q))::logic> >>
+
         let pr = call classify_partition(any_before, any_match, rs_is_gpr0) >>
         let idx_result = call compute_idx(pr, last_before_idx, last_after_idx) >>
         let valid_result = call compute_valid(pr) >>
 
         set idx_q := idx_result >>
         set valid_q := valid_result >>
+
+        cycle 1 >>
+
+        /*
+         * Cycle 4:
+         * Send response.
+         */
         send io.res (*idx_q) >>
         send io.res_valid (*valid_q) >>
+
         cycle 1
     }
 }
