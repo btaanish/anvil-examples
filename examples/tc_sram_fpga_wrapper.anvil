@@ -1,28 +1,4 @@
-/* Read port: req + address in, data out */
-chan rd_ch {
-    left req : (logic@#1) @#1 - @#1,
-    left addr : (logic[4]@#1) @#1 - @#1,
-    right rdata : (logic[64]@#1) @#1 - @#1
-}
-
-/* Write port: req + we + address + data + byte-enable, streaming */
-chan wr_ch {
-    left req : (logic@#1) @#1 - @#1,
-    left we : (logic@#1) @#1 - @#1,
-    left addr : (logic[4]@#1) @#1 - @#1,
-    left wdata : (logic[64]@#1) @#1 - @#1,
-    left be : (logic[8]@#1) @#1 - @#1
-}
-
-/* 4-way mux: select one of four values based on 2-bit selector */
-func mux4(sel, m0, m1, m2, m3) {
-    if (sel == 2'd0) { m0 }
-    else if (sel == 2'd1) { m1 }
-    else if (sel == 2'd2) { m2 }
-    else { m3 }
-}
-
-proc TcSramFpgaWrapper(rd : left rd_ch, wr : left wr_ch) {
+proc TcSramFpgaWrapperMulti(rd : left rd_ch, wr : left wr_ch) {
     reg mem0 : logic[64];
     reg mem1 : logic[64];
     reg mem2 : logic[64];
@@ -40,108 +16,38 @@ proc TcSramFpgaWrapper(rd : left rd_ch, wr : left wr_ch) {
     reg mem14 : logic[64];
     reg mem15 : logic[64];
 
-    /* Read loop: receive req + address, return data via 2-level 4-way mux */
+    reg rd_req_q : logic;
+    reg rd_addr_q : logic[4];
+    reg rd_data_q : logic[64];
+
     loop {
+        /* Cycle 0: accept read request */
         let req = recv rd.req >>
         let addr = recv rd.addr >>
-        if (req == 1'b1) {
-            let addr_hi = <(addr[2+:2])::logic[2]> >>
-            let addr_lo = <(addr[0+:2])::logic[2]> >>
+        set rd_req_q := req >>
+        set rd_addr_q := addr >>
+        cycle 1 >>
+
+        /* Cycle 1: decode address and select data */
+        if (*rd_req_q == 1'b1) {
+            let addr_hi = <((*rd_addr_q)[2+:2])::logic[2]> >>
+            let addr_lo = <((*rd_addr_q)[0+:2])::logic[2]> >>
+
             let grp0 = call mux4(addr_lo, *mem0, *mem1, *mem2, *mem3) >>
             let grp1 = call mux4(addr_lo, *mem4, *mem5, *mem6, *mem7) >>
             let grp2 = call mux4(addr_lo, *mem8, *mem9, *mem10, *mem11) >>
             let grp3 = call mux4(addr_lo, *mem12, *mem13, *mem14, *mem15) >>
+
             let rdata = call mux4(addr_hi, grp0, grp1, grp2, grp3) >>
-            send rd.rdata (rdata) >>
-            cycle 1
+            set rd_data_q := rdata
         } else {
-            send rd.rdata (64'd0) >>
-            cycle 1
-        }
-    }
+            set rd_data_q := 64'd0
+        } >>
 
-    /* Write loop: byte-enable merge and register update */
-    loop {
-        let req = recv wr.req >>
-        let we = recv wr.we >>
-        let addr = recv wr.addr >>
-        let wdata = recv wr.wdata >>
-        let be = recv wr.be >>
+        cycle 1 >>
 
-        if (req == 1'b1 & we == 1'b1) {
-            let addr_hi = <(addr[2+:2])::logic[2]> >>
-            let addr_lo = <(addr[0+:2])::logic[2]> >>
-            let grp0 = call mux4(addr_lo, *mem0, *mem1, *mem2, *mem3) >>
-            let grp1 = call mux4(addr_lo, *mem4, *mem5, *mem6, *mem7) >>
-            let grp2 = call mux4(addr_lo, *mem8, *mem9, *mem10, *mem11) >>
-            let grp3 = call mux4(addr_lo, *mem12, *mem13, *mem14, *mem15) >>
-            let old_val = call mux4(addr_hi, grp0, grp1, grp2, grp3) >>
-
-            let b0 = if (be[0] == 1'b1) { <(wdata[0+:8])::logic[8]> } else { <(old_val[0+:8])::logic[8]> } >>
-            let b1 = if (be[1] == 1'b1) { <(wdata[8+:8])::logic[8]> } else { <(old_val[8+:8])::logic[8]> } >>
-            let b2 = if (be[2] == 1'b1) { <(wdata[16+:8])::logic[8]> } else { <(old_val[16+:8])::logic[8]> } >>
-            let b3 = if (be[3] == 1'b1) { <(wdata[24+:8])::logic[8]> } else { <(old_val[24+:8])::logic[8]> } >>
-            let b4 = if (be[4] == 1'b1) { <(wdata[32+:8])::logic[8]> } else { <(old_val[32+:8])::logic[8]> } >>
-            let b5 = if (be[5] == 1'b1) { <(wdata[40+:8])::logic[8]> } else { <(old_val[40+:8])::logic[8]> } >>
-            let b6 = if (be[6] == 1'b1) { <(wdata[48+:8])::logic[8]> } else { <(old_val[48+:8])::logic[8]> } >>
-            let b7 = if (be[7] == 1'b1) { <(wdata[56+:8])::logic[8]> } else { <(old_val[56+:8])::logic[8]> } >>
-            let new_val = <(#{b7, b6, b5, b4, b3, b2, b1, b0})::logic[64]> >>
-
-            if (addr == 4'd0) { set mem0 := new_val }
-            else if (addr == 4'd1) { set mem1 := new_val }
-            else if (addr == 4'd2) { set mem2 := new_val }
-            else if (addr == 4'd3) { set mem3 := new_val }
-            else if (addr == 4'd4) { set mem4 := new_val }
-            else if (addr == 4'd5) { set mem5 := new_val }
-            else if (addr == 4'd6) { set mem6 := new_val }
-            else if (addr == 4'd7) { set mem7 := new_val }
-            else if (addr == 4'd8) { set mem8 := new_val }
-            else if (addr == 4'd9) { set mem9 := new_val }
-            else if (addr == 4'd10) { set mem10 := new_val }
-            else if (addr == 4'd11) { set mem11 := new_val }
-            else if (addr == 4'd12) { set mem12 := new_val }
-            else if (addr == 4'd13) { set mem13 := new_val }
-            else if (addr == 4'd14) { set mem14 := new_val }
-            else { set mem15 := new_val }
-        } else {
-            cycle 1
-        }
-    }
-}
-
-proc Top() {
-    chan rd_le -- rd_ri : rd_ch;
-    chan wr_le -- wr_ri : wr_ch;
-    spawn TcSramFpgaWrapper(rd_le, wr_le);
-    reg counter : logic[8];
-
-    /* Read test: read address 0 every cycle */
-    loop {
-        send rd_ri.req (1'b1) >>
-        send rd_ri.addr (4'd0) >>
-        let d = recv rd_ri.rdata >>
-        dprint"[Cycle %d] SRAM[0] = %d" (*counter, d) >>
+        /* Cycle 2: send response */
+        send rd.rdata (*rd_data_q) >>
         cycle 1
-    }
-
-    /* Write test: write 42 to address 0 with all bytes enabled */
-    loop {
-        send wr_ri.req (1'b1) >>
-        send wr_ri.we (1'b1) >>
-        send wr_ri.addr (4'd0) >>
-        send wr_ri.wdata (64'd42) >>
-        send wr_ri.be (8'b11111111) >>
-        cycle 1
-    }
-
-    /* Counter */
-    loop {
-        set counter := *counter + 8'd1
-    }
-
-    /* Timeout */
-    loop {
-        cycle 10 >>
-        dfinish
     }
 }
