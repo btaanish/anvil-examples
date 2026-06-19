@@ -89,19 +89,97 @@ func compute_wr_cnt_clr(st, wr_req, wr_single, w_ready) {
     }
 }
 
-proc AxiShim(ep : left axi_shim_ch) {
+proc AxiShimMulti(ep : left axi_shim_ch) {
     reg state : axi_shim_state;
+
+    /* Stage 0: latched inputs */
+    reg wr_req_q : logic;
+    reg wr_single_q : logic;
+    reg aw_ready_q : logic;
+    reg w_ready_q : logic;
+
+    /* Stage 1: computed next state and outputs */
+    reg next_state_q : axi_shim_state;
+    reg aw_valid_q : logic;
+    reg w_valid_q : logic;
+    reg wr_gnt_q : logic;
+    reg wr_cnt_clr_q : logic;
+
     loop {
+        /*
+         * Cycle 0:
+         * Receive and latch input signals.
+         */
         let wr_req = recv ep.wr_req >>
         let wr_single = recv ep.wr_single >>
         let aw_ready = recv ep.aw_ready >>
         let w_ready = recv ep.w_ready >>
+
+        set wr_req_q := wr_req >>
+        set wr_single_q := wr_single >>
+        set aw_ready_q := aw_ready >>
+        set w_ready_q := w_ready >>
+
+        cycle 1 >>
+
+        /*
+         * Cycle 1:
+         * Compute outputs and next FSM state using latched inputs.
+         */
         let st = *state >>
-        set state := call compute_next_state(st, wr_req, wr_single, aw_ready, w_ready);
-        send ep.aw_valid (call compute_aw_valid(st, wr_req)) >>
-        send ep.w_valid (call compute_w_valid(st, wr_req)) >>
-        send ep.wr_gnt (call compute_wr_gnt(st, wr_req, wr_single, aw_ready, w_ready)) >>
-        send ep.wr_cnt_clr (call compute_wr_cnt_clr(st, wr_req, wr_single, w_ready)) >>
+
+        let next_st = call compute_next_state(
+            st,
+            *wr_req_q,
+            *wr_single_q,
+            *aw_ready_q,
+            *w_ready_q
+        ) >>
+
+        let aw_v = call compute_aw_valid(
+            st,
+            *wr_req_q
+        ) >>
+
+        let w_v = call compute_w_valid(
+            st,
+            *wr_req_q
+        ) >>
+
+        let gnt = call compute_wr_gnt(
+            st,
+            *wr_req_q,
+            *wr_single_q,
+            *aw_ready_q,
+            *w_ready_q
+        ) >>
+
+        let cnt_clr = call compute_wr_cnt_clr(
+            st,
+            *wr_req_q,
+            *wr_single_q,
+            *w_ready_q
+        ) >>
+
+        set next_state_q := next_st >>
+        set aw_valid_q := aw_v >>
+        set w_valid_q := w_v >>
+        set wr_gnt_q := gnt >>
+        set wr_cnt_clr_q := cnt_clr >>
+
+        cycle 1 >>
+
+        /*
+         * Cycle 2:
+         * Update state and send registered outputs.
+         */
+        set state := *next_state_q >>
+
+        send ep.aw_valid (*aw_valid_q) >>
+        send ep.w_valid (*w_valid_q) >>
+        send ep.wr_gnt (*wr_gnt_q) >>
+        send ep.wr_cnt_clr (*wr_cnt_clr_q) >>
+
         cycle 1
     }
 }
