@@ -19,18 +19,22 @@ chan serdiv_ch {
     right res_o : (logic[64]@#1) @#1 - @#1
 }
 
-/* Pure function: compute next FSM state */
-func compute_next_state(st, in_vld, flush, out_rdy) {
+func compute_next_state(st, in_vld, flush, out_rdy, cnt) {
     if flush { serdiv_state::IDLE }
     else {
         match (st) {
             serdiv_state::IDLE =>
                 if in_vld { serdiv_state::DIVIDE }
                 else { serdiv_state::IDLE },
-            serdiv_state::DIVIDE => serdiv_state::FINISH,
+
+            serdiv_state::DIVIDE =>
+                if (cnt == 6'd0) { serdiv_state::FINISH }
+                else { serdiv_state::DIVIDE },
+
             serdiv_state::FINISH =>
                 if out_rdy { serdiv_state::IDLE }
                 else { serdiv_state::FINISH },
+
             _ => serdiv_state::IDLE
         }
     }
